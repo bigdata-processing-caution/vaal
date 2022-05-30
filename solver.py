@@ -23,7 +23,8 @@ class Solver:
         self.ce_loss = nn.CrossEntropyLoss()
 
         self.sampler = sampler.AdversarySampler(self.args.budget)
-
+        self.sampler_uncertainty = sampler.UncertaintySampler(self.args.budget)
+        self.sampler_random = sampler.RandomSampler(self.args.budget)
 
     def read_data(self, dataloader, labels=True):
         if labels:
@@ -38,12 +39,13 @@ class Solver:
 
     def train(self, querry_dataloader, val_dataloader, task_model, vae, discriminator, unlabeled_dataloader):
         self.args.train_iterations = (self.args.num_images * self.args.train_epochs) // self.args.batch_size
+        # self.args.train_iterations = 100
         lr_change = self.args.train_iterations // 4
         labeled_data = self.read_data(querry_dataloader)
         unlabeled_data = self.read_data(unlabeled_dataloader, labels=False)
 
-        optim_vae = optim.Adam(vae.parameters(), lr=5e-4)
-        optim_task_model = optim.SGD(task_model.parameters(), lr=0.01, weight_decay=5e-4, momentum=0.9)
+        optim_vae = optim.Adam(vae.parameters(), lr=5e-6)
+        optim_task_model = optim.Adam(task_model.parameters(), lr=0.001, weight_decay=5e-4)
         optim_discriminator = optim.Adam(discriminator.parameters(), lr=5e-4)
 
 
@@ -69,15 +71,18 @@ class Solver:
                 unlabeled_imgs = unlabeled_imgs.cuda()
                 labels = labels.cuda()
 
+            optim_task_model.zero_grad()
             # task_model step
+            # print('labeled_img ',labeled_imgs.shape)
             preds = task_model(labeled_imgs)
             task_loss = self.ce_loss(preds, labels)
-            optim_task_model.zero_grad()
             task_loss.backward()
             optim_task_model.step()
 
             # VAE step
             for count in range(self.args.num_vae_steps):
+                optim_vae.zero_grad()
+                
                 recon, z, mu, logvar = vae(labeled_imgs)
                 unsup_loss = self.vae_loss(labeled_imgs, recon, mu, logvar, self.args.beta)
                 unlab_recon, unlab_z, unlab_mu, unlab_logvar = vae(unlabeled_imgs)
@@ -93,11 +98,22 @@ class Solver:
                 if self.args.cuda:
                     lab_real_preds = lab_real_preds.cuda()
                     unlab_real_preds = unlab_real_preds.cuda()
+                    
+                # print(f'mu: {mu.mean()}, labeled_preds: {labeled_preds.min().item()}, {labeled_preds.max().item()}')
+                # print(f'unlab_mu: {unlab_mu.mean()}, unlabeled_preds: {unlabeled_preds.min().item()}, {unlabeled_preds.max().item()}')
+                
 
                 dsc_loss = self.bce_loss(labeled_preds, lab_real_preds) + \
                         self.bce_loss(unlabeled_preds, unlab_real_preds)
+                
+                # print(unsup_loss, transductive_loss, dsc_loss)
+                
+                # print('unsup_loss', unsup_loss)
+                # print('transductive_loss', transductive_loss)
+                # print('dsc_loss', dsc_loss)
+                
                 total_vae_loss = unsup_loss + transductive_loss + self.args.adversary_param * dsc_loss
-                optim_vae.zero_grad()
+                # optim_vae.zero_grad()
                 total_vae_loss.backward()
                 optim_vae.step()
 
@@ -146,19 +162,21 @@ class Solver:
 
                 
 
-            if iter_count % 100 == 0:
-                print('Current training iteration: {}'.format(iter_count))
+            if (iter_count+1) % 100 == 0:
+                print('Current training iteration: {}'.format(iter_count+1))
                 print('Current task model loss: {:.4f}'.format(task_loss.item()))
                 print('Current vae model loss: {:.4f}'.format(total_vae_loss.item()))
                 print('Current discriminator model loss: {:.4f}'.format(dsc_loss.item()))
 
-            if iter_count % 1000 == 0:
+            if (iter_count+1) % 1000 == 0:
                 acc = self.validate(task_model, val_dataloader)
                 if acc > best_acc:
                     best_acc = acc
                     best_model = copy.deepcopy(task_model)
+                    torch.save({'stae_dict': task_model.state_dict(),
+                                'best_acc' : best_acc},os.path.join(self.args.out_path, self.args.log_name))
                 
-                print('current step: {} acc: {}'.format(iter_count, acc))
+                print('current step: {} acc: {}'.format(iter_count+1, acc))
                 print('best acc: ', best_acc)
 
 
@@ -174,6 +192,17 @@ class Solver:
                                              discriminator, 
                                              unlabeled_dataloader, 
                                              self.args.cuda)
+
+        return querry_indices
+    
+    def sample_for_labeling_uncertainty(self, task_model, unlabeled_dataloader):
+        querry_indices = self.sampler_uncertainty.sample(task_model, 
+                                             unlabeled_dataloader, 
+                                             self.args.cuda)
+
+        return querry_indices
+    def sample_for_labeling_random(self, unlabeled_dataloader):
+        querry_indices = self.sampler_random.sample(unlabeled_dataloader)
 
         return querry_indices
                 
@@ -196,7 +225,7 @@ class Solver:
     def test(self, task_model):
         task_model.eval()
         total, correct = 0, 0
-        for imgs, labels in self.test_dataloader:
+        for imgs, labels, _ in self.test_dataloader:
             if self.args.cuda:
                 imgs = imgs.cuda()
 
@@ -210,7 +239,10 @@ class Solver:
 
 
     def vae_loss(self, x, recon, mu, logvar, beta):
+        # print(recon.shape)
+        # print(x.shape)
         MSE = self.mse_loss(recon, x)
-        KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+        KLD = KLD.mean()
         KLD = KLD * beta
         return MSE + KLD

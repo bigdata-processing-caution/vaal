@@ -1,7 +1,11 @@
+# import os
+# os.environ["CUDA_VISIBLE_DEVICES"]= '1'
+
 import torch
 from torchvision import datasets, transforms
 import torch.utils.data.sampler  as sampler
 import torch.utils.data as data
+from torchvision.models import inception_v3
 
 import numpy as np
 import argparse
@@ -61,6 +65,24 @@ def main(args):
         args.budget = 64060
         args.initial_budget = 128120
         args.num_classes = 1000
+        
+    elif args.dataset == 'imagenette2':
+        # test_dataloader = data.DataLoader(
+        #         datasets.ImageFolder(args.data_path, transform=imagenet_transformer()),
+        #     drop_last=False, batch_size=args.batch_size)
+        test_dataloader = data.DataLoader(
+            ImageNet('./data/imagenette2/val'),
+            drop_last=False, batch_size=args.batch_size)
+        # x,y,z = next(iter(test_dataloader))
+        # print(type(x))
+
+        train_dataset = ImageNet(args.data_path)
+
+        args.num_val = 3925
+        args.num_images = 9469
+        args.budget = 1000
+        args.initial_budget = 1000
+        args.num_classes = 10
     else:
         raise NotImplementedError
 
@@ -68,8 +90,18 @@ def main(args):
     val_indices = random.sample(all_indices, args.num_val)
     all_indices = np.setdiff1d(list(all_indices), val_indices)
 
-    initial_indices = random.sample(list(all_indices), args.initial_budget)
-    sampler = data.sampler.SubsetRandomSampler(initial_indices)
+    # initial_indices = random.sample(list(all_indices), args.initial_budget)
+    # print(type(initial_indices))
+    ### 정해진 1000개의 initial index 불러오기 -- 경로 정해주기
+    f = open("/home/yura/yura11/class-2022-bigdata-processing/data/initial_data_indices.txt", 'r')
+    lines = f.read().split()
+    f.close()
+    initial_indices = list()
+    for line in lines:
+        initial_indices.extend(list(map(int, line.rstrip().split(','))))
+    #####
+    
+    sampler = data.sampler.SubsetRandomSampler(initial_indices) 
     val_sampler = data.sampler.SubsetRandomSampler(val_indices)
 
     # dataset with labels available
@@ -81,7 +113,7 @@ def main(args):
     args.cuda = args.cuda and torch.cuda.is_available()
     solver = Solver(args, test_dataloader)
 
-    splits = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
+    splits = [0.1, 0.2, 0.3, 0.4, 0.5]
 
     current_indices = list(initial_indices)
 
@@ -90,7 +122,8 @@ def main(args):
     for split in splits:
         # need to retrain all the models on the new images
         # re initialize and retrain the models
-        task_model = vgg.vgg16_bn(num_classes=args.num_classes)
+        task_model = inception_v3(num_classes=args.num_classes, aux_logits = False)
+        # task_model = vgg.vgg16_bn(num_classes=args.num_classes)
         vae = model.VAE(args.latent_dim)
         discriminator = model.Discriminator(args.latent_dim)
 
@@ -110,8 +143,13 @@ def main(args):
 
         print('Final accuracy with {}% of data is: {:.2f}'.format(int(split*100), acc))
         accuracies.append(acc)
-
-        sampled_indices = solver.sample_for_labeling(vae, discriminator, unlabeled_dataloader)
+        if args.select == 'vae':
+            sampled_indices = solver.sample_for_labeling(vae, discriminator, unlabeled_dataloader)
+        elif args.select == 'uncertainty':
+            sampled_indices = solver.sample_for_labeling_uncertainty(task_model, unlabeled_dataloader)
+        else:
+            sampled_indices = solver.sample_for_labeling_random(unlabeled_dataloader)
+            
         current_indices = list(current_indices) + list(sampled_indices)
         sampler = data.sampler.SubsetRandomSampler(current_indices)
         querry_dataloader = data.DataLoader(train_dataset, sampler=sampler, 

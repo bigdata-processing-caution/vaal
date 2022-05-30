@@ -10,9 +10,10 @@ def imagenet_transformer():
         transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.5, 0.5, 0.5],
+                             std=[0.5, 0.5, 0.5])
     ])
+    return transform
 
 def cifar10_transformer():
     return torchvision.transforms.Compose([
@@ -64,13 +65,12 @@ class CIFAR100(Dataset):
 
 class ImageNet(Dataset):
     def __init__(self, path):
-        self.imagenet = datasets.ImageFolder(root=path, transform=imagenet_transformer)
+        self.imagenet = datasets.ImageFolder(root=path, transform=imagenet_transformer())
 
     def __getitem__(self, index):
         if isinstance(index, numpy.float64):
             index = index.astype(numpy.int64)
         data, target = self.imagenet[index]
-
         return data, target, index
 
     def __len__(self):
